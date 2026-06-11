@@ -1,0 +1,1 @@
+"""Inbound REST adapter (FastAPI)."""

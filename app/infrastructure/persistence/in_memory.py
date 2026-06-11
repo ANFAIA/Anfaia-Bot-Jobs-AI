@@ -1,0 +1,127 @@
+"""In-memory job repository.
+
+Implements the same port as the SQLAlchemy repository. It is useful for:
+  - unit and integration tests of the workflow without PostgreSQL,
+  - fast local development without spinning up the database.
+
+Similarity is computed with pure-Python cosine.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from app.domain.entities import PublishableJobOffer
+from app.domain.value_objects import Category
+from app.interfaces.repositories import (
+    JobRepository,
+    SimilarOffer,
+    StatsSnapshot,
+    StoredJobOffer,
+)
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors; 0 if either is null."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+@dataclass
+class _Record:
+    stored: StoredJobOffer
+    embedding: list[float] | None
+    fingerprint: str
+
+
+class InMemoryJobRepository(JobRepository):
+    """Volatile repository for tests and development."""
+
+    def __init__(self) -> None:
+        self._records: list[_Record] = []
+        self._counters: dict[str, int] = {}
+        self._next_id = 1
+
+    async def url_exists(self, url_fingerprint: str) -> bool:
+        return any(r.fingerprint == url_fingerprint for r in self._records)
+
+    async def find_similar(
+        self, embedding: list[float], threshold: float, limit: int = 5
+    ) -> list[SimilarOffer]:
+        scored = [
+            SimilarOffer(
+                offer_id=r.stored.id,
+                url=r.stored.url,
+                similarity=cosine_similarity(embedding, r.embedding or []),
+            )
+            for r in self._records
+            if r.embedding is not None
+        ]
+        hits = [s for s in scored if s.similarity >= threshold]
+        hits.sort(key=lambda s: s.similarity, reverse=True)
+        return hits[:limit]
+
+    async def save_published(
+        self, post: PublishableJobOffer, embedding: list[float] | None
+    ) -> int:
+        offer_id = self._next_id
+        self._next_id += 1
+        offer = post.offer
+        stored = StoredJobOffer(
+            id=offer_id,
+            title=offer.title,
+            url=offer.url,
+            company=offer.company,
+            source=offer.source,
+            category=post.category,
+            modality=offer.modality.value,
+            location=offer.location,
+            salary=offer.salary,
+            seniority=offer.seniority,
+            relevance_score=post.relevance_score.value,
+            summary=offer.summary,
+            published_at=offer.published_at,
+            discord_message_id=post.discord_message_id,
+            created_at=datetime.now(UTC),
+        )
+        self._records.append(
+            _Record(stored=stored, embedding=embedding, fingerprint=offer.url_fingerprint)
+        )
+        return offer_id
+
+    async def increment_counter(self, name: str, amount: int = 1) -> None:
+        self._counters[name] = self._counters.get(name, 0) + amount
+
+    async def list_offers(
+        self, *, limit: int, offset: int, category: Category | None = None
+    ) -> list[StoredJobOffer]:
+        items = [r.stored for r in self._records]
+        if category is not None:
+            items = [s for s in items if s.category == category]
+        items.sort(key=lambda s: s.created_at, reverse=True)
+        return items[offset : offset + limit]
+
+    async def get_offer(self, offer_id: int) -> StoredJobOffer | None:
+        return next((r.stored for r in self._records if r.stored.id == offer_id), None)
+
+    async def stats(self) -> StatsSnapshot:
+        by_category: dict[str, int] = {}
+        for r in self._records:
+            key = r.stored.category.value
+            by_category[key] = by_category.get(key, 0) + 1
+        return StatsSnapshot(
+            analyzed=self._counters.get("analyzed", 0),
+            published=max(self._counters.get("published", 0), len(self._records)),
+            discarded=self._counters.get("discarded", 0),
+            by_category=by_category,
+            last_run_at=None,
+            last_run_status=None,
+        )
