@@ -102,6 +102,7 @@ class WorkflowReport:
     classified: int = 0
     discarded_duplicates: int = 0
     discarded_low_relevance: int = 0
+    discarded_same_company: int = 0
     published: int = 0
     published_offers: list[PublishableJobOffer] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)

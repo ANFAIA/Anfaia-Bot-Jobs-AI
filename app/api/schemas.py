@@ -61,6 +61,7 @@ class WorkflowRunResponse(BaseModel):
     published: int
     discarded_duplicates: int
     discarded_low_relevance: int
+    discarded_same_company: int
     errors: list[str]
     published_titles: list[str]
     discord_message_ids: list[int]
@@ -74,6 +75,7 @@ class WorkflowRunResponse(BaseModel):
             published=report.published,
             discarded_duplicates=report.discarded_duplicates,
             discarded_low_relevance=report.discarded_low_relevance,
+            discarded_same_company=report.discarded_same_company,
             errors=report.errors,
             published_titles=[post.edited.title for post in report.published_offers],
             discord_message_ids=[

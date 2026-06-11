@@ -2,7 +2,7 @@
 
 Pipeline:
 
-    Collect Offers → Classify → Rank → Remove Duplicates
+    Collect Offers → Classify → Rank (Europe-friendly first) → Remove Duplicates
     → Edit Job Post → Publish to Discord → Save History
     (repeated until `max_offers_per_run` offers are published)
 
@@ -10,6 +10,15 @@ It is a custom implementation (without an orchestration framework) that honors
 the `JobsWorkflow` contract. Each step delegates to a specialized agent. Unlike
 a news digest, a jobs channel benefits from several posts per run, so the
 pipeline walks the ranked candidates and publishes the top N unique offers.
+
+Three community-driven selection rules apply on top of the relevance ranking:
+  - Offers applicable from Europe get a ranking boost (and offers explicitly
+    restricted to other regions get the same penalty).
+  - A best-effort number of slots per run is reserved for offers based in
+    Spain (`spain_offers_per_run`), so local offers are not always crowded out
+    by the international remote boards.
+  - At most one offer per company per run, so a company bulk-posting several
+    roles does not monopolize the day's batch.
 """
 
 from __future__ import annotations
@@ -24,7 +33,8 @@ from app.agents.job_collector import JobCollectorAgent
 from app.agents.job_editor import JobEditorAgent
 from app.core.logging import get_logger
 from app.core.metrics import metrics
-from app.domain.entities import PublishableJobOffer, WorkflowReport
+from app.domain.entities import JobOffer, PublishableJobOffer, WorkflowReport
+from app.domain.geo import europe_friendly, is_spain_offer
 from app.interfaces.repositories import JobRepository
 from app.workflows.base import JobsWorkflow
 
@@ -45,6 +55,8 @@ class DailyJobsWorkflow(JobsWorkflow):
         repository: JobRepository,
         min_relevance_score: int,
         max_offers_per_run: int,
+        europe_boost: int = 15,
+        spain_offers_per_run: int = 1,
     ) -> None:
         self._collector = collector
         self._classifier = classifier
@@ -54,6 +66,8 @@ class DailyJobsWorkflow(JobsWorkflow):
         self._repo = repository
         self._min_relevance = min_relevance_score
         self._max_offers = max_offers_per_run
+        self._europe_boost = europe_boost
+        self._spain_per_run = spain_offers_per_run
 
     async def run(self) -> WorkflowReport:
         report = WorkflowReport(started_at=datetime.now(UTC))
@@ -91,52 +105,104 @@ class DailyJobsWorkflow(JobsWorkflow):
         classified = await asyncio.gather(*(self._classifier.run(offer) for offer in collected))
         report.classified = len(classified)
 
-        # 3. Rank + filter by minimum relevance.
-        ranked = sorted(
-            classified,
-            key=lambda it: it.relevance_score.value if it.relevance_score else 0,
-            reverse=True,
-        )
+        # 3. Filter by minimum relevance (raw LLM score) and rank by priority
+        # (relevance ± the Europe-friendliness boost).
         candidates = [
             it
-            for it in ranked
+            for it in classified
             if it.relevance_score and it.relevance_score.is_at_least(self._min_relevance)
         ]
-        report.discarded_low_relevance = len(ranked) - len(candidates)
+        report.discarded_low_relevance = len(classified) - len(candidates)
         if not candidates:
             report.errors.append("Ninguna oferta superó el umbral de relevancia")
             return
+        ranked = sorted(candidates, key=self._priority, reverse=True)
 
         # 4-7. Walk the ranked candidates: dedup, edit, publish, persist; stop
         # once the per-run cap is reached. One failing offer does not block the
-        # rest of the batch.
-        for candidate in candidates:
+        # rest of the batch. Spain-based offers get their reserved slots first;
+        # unused slots (no unique Spain offer today) go back to the general pool.
+        # At most one offer per company makes it into the same run.
+        processed: set[str] = set()
+        published_companies: set[str] = set()
+
+        async def try_publish(candidate: JobOffer) -> bool:
+            company = candidate.company.strip().lower()
+            if company and company in published_companies:
+                report.discarded_same_company += 1
+                logger.info(
+                    "workflow.same_company_skipped",
+                    title=candidate.title,
+                    company=candidate.company,
+                )
+                return False
+            if await self._publish_offer(candidate, report):
+                if company:
+                    published_companies.add(company)
+                return True
+            return False
+
+        spain_target = min(self._spain_per_run, self._max_offers)
+        spain_published = 0
+        for candidate in (c for c in ranked if is_spain_offer(c)):
+            if spain_published >= spain_target or report.published >= self._max_offers:
+                break
+            processed.add(candidate.url_fingerprint)
+            if await try_publish(candidate):
+                spain_published += 1
+
+        for candidate in ranked:
             if report.published >= self._max_offers:
                 break
-
-            decision = await self._duplicate_detector.run(candidate)
-            if decision.is_duplicate:
-                report.discarded_duplicates += 1
+            if candidate.url_fingerprint in processed:
                 continue
-
-            try:
-                edited = await self._editor.run(candidate)
-                post = PublishableJobOffer(offer=candidate, edited=edited)
-                published = await self._publisher.run(post)
-                offer_id = await self._repo.save_published(published, decision.embedding)
-            except Exception as exc:
-                logger.exception("workflow.offer_failed", title=candidate.title)
-                report.errors.append(f"{candidate.title}: {exc}")
-                continue
-
-            await self._repo.increment_counter("published", 1)
-            metrics.increment("offers_published")
-            report.published += 1
-            report.published_offers.append(published)
-            logger.info("workflow.published", offer_id=offer_id, title=edited.title)
+            processed.add(candidate.url_fingerprint)
+            await try_publish(candidate)
 
         await self._repo.increment_counter(
             "discarded", report.discarded_duplicates + report.discarded_low_relevance
         )
         if report.published == 0 and not report.errors:
             report.errors.append("Todas las ofertas candidatas eran duplicadas")
+
+    def _priority(self, offer: JobOffer) -> int:
+        """Ordering score: relevance adjusted by Europe-friendliness."""
+        score = offer.relevance_score.value if offer.relevance_score else 0
+        friendly = europe_friendly(offer)
+        if friendly is True:
+            score += self._europe_boost
+        elif friendly is False:
+            score -= self._europe_boost
+        return score
+
+    async def _publish_offer(self, candidate: JobOffer, report: WorkflowReport) -> bool:
+        """Dedup-check, edit, publish and persist one candidate.
+
+        Returns True when the offer ended up published.
+        """
+        decision = await self._duplicate_detector.run(candidate)
+        if decision.is_duplicate:
+            report.discarded_duplicates += 1
+            return False
+
+        try:
+            edited = await self._editor.run(candidate)
+            post = PublishableJobOffer(offer=candidate, edited=edited)
+            published = await self._publisher.run(post)
+            offer_id = await self._repo.save_published(published, decision.embedding)
+        except Exception as exc:
+            logger.exception("workflow.offer_failed", title=candidate.title)
+            report.errors.append(f"{candidate.title}: {exc}")
+            return False
+
+        await self._repo.increment_counter("published", 1)
+        metrics.increment("offers_published")
+        report.published += 1
+        report.published_offers.append(published)
+        logger.info(
+            "workflow.published",
+            offer_id=offer_id,
+            title=edited.title,
+            spain=is_spain_offer(candidate),
+        )
+        return True

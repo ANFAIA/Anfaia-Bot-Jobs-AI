@@ -31,6 +31,13 @@ publicación) y puede evolucionar a frameworks de orquestación como
      gestión de errores.
 - **Varias ofertas por ejecución**: publica las `MAX_OFFERS_PER_RUN` mejores
   ofertas únicas de cada día (no solo una).
+- **Prioridad Europa + cupo España**: las ofertas aplicables desde Europa
+  reciben un *boost* en el ranking (`EUROPE_BOOST`, y la misma penalización si
+  están restringidas a otras regiones), y cada ejecución reserva
+  `SPAIN_OFFERS_PER_RUN` huecos para ofertas basadas en España (si ese día no
+  hay ninguna única, el hueco vuelve al cupo general).
+- **Máximo una oferta por empresa y ejecución**: una empresa que publica varios
+  roles a la vez no monopoliza el lote del día (solo entra su mejor oferta).
 - **Fuentes gratuitas sin API key**:
   - APIs JSON: [Remotive](https://remotive.com), [RemoteOK](https://remoteok.com)
     y [Arbeitnow](https://www.arbeitnow.com).
@@ -67,8 +74,8 @@ app/
 ### Flujo del workflow
 
 ```
-Collect Offers → Classify → Rank → Remove Duplicates
-   → Edit Job Post → Publish to Discord → Save History
+Collect Offers → Classify → Rank (prioridad Europa + cupo España)
+   → Remove Duplicates → Edit Job Post → Publish to Discord → Save History
    (se repite hasta publicar MAX_OFFERS_PER_RUN ofertas)
 ```
 
@@ -171,6 +178,8 @@ curl http://localhost:8001/stats
 | `TIMEZONE` | Zona horaria | `Europe/Madrid` |
 | `MIN_RELEVANCE_SCORE` | Score mínimo para publicar | `55` |
 | `MAX_OFFERS_PER_RUN` | Ofertas publicadas por ejecución | `3` |
+| `EUROPE_BOOST` | Boost (±) en el ranking según se pueda aplicar desde Europa o no (solo ordena; el umbral usa el score bruto) | `15` |
+| `SPAIN_OFFERS_PER_RUN` | Huecos reservados por ejecución para ofertas de España (0 lo desactiva) | `1` |
 | `MAX_ITEMS_PER_SOURCE` | Ofertas recogidas por fuente | `25` |
 | `JOB_KEYWORDS` | Pre-filtro por palabras clave (separadas por comas; vacío lo desactiva) | `ai,machine learning,...` |
 | `REMOTIVE_ENABLED` / `REMOTEOK_ENABLED` / `ARBEITNOW_ENABLED` | Activan cada fuente | `true` |

@@ -109,7 +109,21 @@ class Settings(BaseSettings):
     # Keyword pre-filter applied by the collector (comma-separated). An offer
     # must match at least one keyword in title/tags/description to enter the
     # pipeline; this keeps LLM calls bounded. Empty disables the filter.
-    job_keywords: str = "ai,machine learning,ml,llm,data,python,deep learning,nlp,mlops"
+    # Includes Spanish terms so offers from Spanish boards (SEPE, Tecnoempleo)
+    # are not dropped before classification.
+    job_keywords: str = (
+        "ai,machine learning,ml,llm,data,python,deep learning,nlp,mlops,"
+        "inteligencia artificial,desarrollador,programador,ingenier,software,datos"
+    )
+
+    # --- Prioritization ---
+    # Ranking boost (±) applied to offers that can / explicitly cannot be
+    # applied to from Europe. Ordering only; the relevance threshold
+    # (MIN_RELEVANCE_SCORE) always uses the raw classifier score.
+    europe_boost: int = 15
+    # Best-effort slots reserved each run for offers based in Spain
+    # (0 disables the quota).
+    spain_offers_per_run: int = 1
     http_user_agent: str = "AnfaiaJobsAI/0.1 (+https://anfaia.org)"
     http_timeout_seconds: float = 20.0
 

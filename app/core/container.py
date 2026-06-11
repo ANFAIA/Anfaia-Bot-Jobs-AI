@@ -100,6 +100,8 @@ class Container:
             repository=self.repository,
             min_relevance_score=settings.min_relevance_score,
             max_offers_per_run=settings.max_offers_per_run,
+            europe_boost=settings.europe_boost,
+            spain_offers_per_run=settings.spain_offers_per_run,
         )
 
         # --- Use cases ---
