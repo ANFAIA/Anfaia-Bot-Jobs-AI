@@ -13,6 +13,8 @@ from app.domain.entities import PublishableJobOffer
 from app.domain.value_objects import Modality
 
 _MAX_FIELD = 1024  # Discord limit per embed field
+_MAX_DESCRIPTION = 4096  # Discord limit per embed description
+_SUMMARY_COLOR = 0x5865F2  # Discord blurple
 
 _MODALITY_LABELS = {
     Modality.REMOTE: "🌍 Remoto",
@@ -25,6 +27,29 @@ _MODALITY_LABELS = {
 def _field(value: str) -> str:
     value = value.strip() or "—"
     return value[: _MAX_FIELD - 1] + "…" if len(value) > _MAX_FIELD else value
+
+
+def build_summary_embed(posts: list[PublishableJobOffer], *, date_label: str) -> discord.Embed:
+    """Daily header announcing the batch; the offers themselves go in its thread."""
+    count = len(posts)
+    noun = "oferta" if count == 1 else "ofertas"
+    lines = []
+    for post in posts:
+        company = post.offer.company.strip()
+        suffix = f" · {company}" if company else ""
+        lines.append(f"• **{post.edited.title}**{suffix}")
+    description = "\n".join(lines)
+    if len(description) > _MAX_DESCRIPTION:
+        description = description[: _MAX_DESCRIPTION - 1] + "…"
+
+    embed = discord.Embed(
+        title=f"📋 Ofertas de empleo · {date_label}",
+        description=description or "—",
+        color=_SUMMARY_COLOR,
+    )
+    embed.set_author(name="Anfaia Jobs AI")
+    embed.set_footer(text=f"{count} {noun} · abre el hilo para ver el detalle 👇")
+    return embed
 
 
 def build_job_embed(post: PublishableJobOffer) -> discord.Embed:

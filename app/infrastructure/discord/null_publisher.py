@@ -23,5 +23,11 @@ class NullPublisher(Publisher):
         logger.error("publisher.not_configured", title=post.edited.title)
         raise PublisherError(_NOT_CONFIGURED)
 
+    async def publish_batch(
+        self, posts: list[PublishableJobOffer], *, summary_date: str
+    ) -> list[int | None]:
+        logger.error("publisher.not_configured", count=len(posts))
+        raise PublisherError(_NOT_CONFIGURED)
+
     async def publish_test_message(self, text: str) -> int:
         raise PublisherError(_NOT_CONFIGURED)

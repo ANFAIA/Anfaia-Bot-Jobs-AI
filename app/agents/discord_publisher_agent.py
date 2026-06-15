@@ -26,3 +26,23 @@ class DiscordPublisherAgent(Agent[PublishableJobOffer, PublishableJobOffer]):
         message_id = await self._publisher.publish(input_data)
         logger.info("publisher.done", message_id=message_id, title=input_data.edited.title)
         return input_data.published_as(message_id)
+
+    async def run_batch(
+        self, posts: list[PublishableJobOffer], *, summary_date: str
+    ) -> list[PublishableJobOffer | None]:
+        """Publish the day's batch (summary + thread) and tag each post with its id.
+
+        Returns a list aligned with ``posts``: each entry carries its Discord
+        message id, or is ``None`` when that single offer could not be sent.
+        """
+        message_ids = await self._publisher.publish_batch(posts, summary_date=summary_date)
+        results = [
+            post.published_as(message_id) if message_id is not None else None
+            for post, message_id in zip(posts, message_ids, strict=True)
+        ]
+        logger.info(
+            "publisher.batch_done",
+            published=sum(1 for post in results if post is not None),
+            total=len(posts),
+        )
+        return results

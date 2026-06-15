@@ -56,12 +56,24 @@ class FakePublisher(Publisher):
 
     def __init__(self):
         self.published: list[PublishableJobOffer] = []
+        self.batches: list[tuple[str, list[PublishableJobOffer]]] = []
         self._next_id = 1000
 
     async def publish(self, post: PublishableJobOffer) -> int:
         self.published.append(post)
         self._next_id += 1
         return self._next_id
+
+    async def publish_batch(
+        self, posts: list[PublishableJobOffer], *, summary_date: str
+    ) -> list[int | None]:
+        self.batches.append((summary_date, list(posts)))
+        message_ids: list[int | None] = []
+        for post in posts:
+            self.published.append(post)
+            self._next_id += 1
+            message_ids.append(self._next_id)
+        return message_ids
 
     async def publish_test_message(self, text: str) -> int:
         return 1

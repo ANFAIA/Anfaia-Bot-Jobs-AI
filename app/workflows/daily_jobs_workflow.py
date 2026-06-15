@@ -3,13 +3,16 @@
 Pipeline:
 
     Collect Offers → Classify → Rank (Europe-friendly first) → Remove Duplicates
-    → Edit Job Post → Publish to Discord → Save History
-    (repeated until `max_offers_per_run` offers are published)
+    → Edit Job Post → (collect the top N unique offers)
+    → Publish daily batch to Discord (summary message + a thread of offers)
+    → Save History
 
 It is a custom implementation (without an orchestration framework) that honors
 the `JobsWorkflow` contract. Each step delegates to a specialized agent. Unlike
 a news digest, a jobs channel benefits from several posts per run, so the
-pipeline walks the ranked candidates and publishes the top N unique offers.
+pipeline walks the ranked candidates, selects the top N unique offers and then
+publishes them together: one summary message announcing the day's offers, with
+every offer posted inside a thread hanging off that message.
 
 Three community-driven selection rules apply on top of the relevance ranking:
   - Offers applicable from Europe get a ranking boost (and offers explicitly
@@ -35,6 +38,7 @@ from app.core.logging import get_logger
 from app.core.metrics import metrics
 from app.domain.entities import JobOffer, PublishableJobOffer, WorkflowReport
 from app.domain.geo import europe_friendly, is_spain_offer
+from app.domain.similarity import cosine_similarity
 from app.interfaces.repositories import JobRepository
 from app.workflows.base import JobsWorkflow
 
@@ -57,6 +61,7 @@ class DailyJobsWorkflow(JobsWorkflow):
         max_offers_per_run: int,
         europe_boost: int = 15,
         spain_offers_per_run: int = 1,
+        duplicate_similarity_threshold: float = 0.95,
     ) -> None:
         self._collector = collector
         self._classifier = classifier
@@ -68,6 +73,7 @@ class DailyJobsWorkflow(JobsWorkflow):
         self._max_offers = max_offers_per_run
         self._europe_boost = europe_boost
         self._spain_per_run = spain_offers_per_run
+        self._similarity_threshold = duplicate_similarity_threshold
 
     async def run(self) -> WorkflowReport:
         report = WorkflowReport(started_at=datetime.now(UTC))
@@ -118,17 +124,20 @@ class DailyJobsWorkflow(JobsWorkflow):
             return
         ranked = sorted(candidates, key=self._priority, reverse=True)
 
-        # 4-7. Walk the ranked candidates: dedup, edit, publish, persist; stop
-        # once the per-run cap is reached. One failing offer does not block the
-        # rest of the batch. Spain-based offers get their reserved slots first;
-        # unused slots (no unique Spain offer today) go back to the general pool.
-        # At most one offer per company makes it into the same run.
+        # 4-6. Walk the ranked candidates and SELECT the day's batch: dedup and
+        # edit each one, collecting up to `max_offers` unique offers. Nothing is
+        # published or persisted yet — that happens once, in a single batch, so
+        # the whole run shows up as one summary message plus a thread of offers.
+        # Spain-based offers get their reserved slots first; unused slots (no
+        # unique Spain offer today) go back to the general pool. At most one
+        # offer per company makes it into the same run.
         processed: set[str] = set()
-        published_companies: set[str] = set()
+        selected_companies: set[str] = set()
+        selected: list[tuple[PublishableJobOffer, list[float]]] = []
 
-        async def try_publish(candidate: JobOffer) -> bool:
+        async def try_select(candidate: JobOffer) -> bool:
             company = candidate.company.strip().lower()
-            if company and company in published_companies:
+            if company and company in selected_companies:
                 report.discarded_same_company += 1
                 logger.info(
                     "workflow.same_company_skipped",
@@ -136,28 +145,34 @@ class DailyJobsWorkflow(JobsWorkflow):
                     company=candidate.company,
                 )
                 return False
-            if await self._publish_offer(candidate, report):
-                if company:
-                    published_companies.add(company)
-                return True
-            return False
+            prepared = await self._prepare_offer(candidate, report, selected)
+            if prepared is None:
+                return False
+            selected.append(prepared)
+            if company:
+                selected_companies.add(company)
+            return True
 
         spain_target = min(self._spain_per_run, self._max_offers)
-        spain_published = 0
+        spain_selected = 0
         for candidate in (c for c in ranked if is_spain_offer(c)):
-            if spain_published >= spain_target or report.published >= self._max_offers:
+            if spain_selected >= spain_target or len(selected) >= self._max_offers:
                 break
             processed.add(candidate.url_fingerprint)
-            if await try_publish(candidate):
-                spain_published += 1
+            if await try_select(candidate):
+                spain_selected += 1
 
         for candidate in ranked:
-            if report.published >= self._max_offers:
+            if len(selected) >= self._max_offers:
                 break
             if candidate.url_fingerprint in processed:
                 continue
             processed.add(candidate.url_fingerprint)
-            await try_publish(candidate)
+            await try_select(candidate)
+
+        # 7-8. Publish the selected batch to Discord and persist whatever made
+        # it through.
+        await self._publish_and_persist(selected, report)
 
         await self._repo.increment_counter(
             "discarded", report.discarded_duplicates + report.discarded_low_relevance
@@ -175,34 +190,82 @@ class DailyJobsWorkflow(JobsWorkflow):
             score -= self._europe_boost
         return score
 
-    async def _publish_offer(self, candidate: JobOffer, report: WorkflowReport) -> bool:
-        """Dedup-check, edit, publish and persist one candidate.
+    async def _prepare_offer(
+        self,
+        candidate: JobOffer,
+        report: WorkflowReport,
+        selected: list[tuple[PublishableJobOffer, list[float]]],
+    ) -> tuple[PublishableJobOffer, list[float]] | None:
+        """Dedup-check and edit one candidate, returning it ready to publish.
 
-        Returns True when the offer ended up published.
+        Returns the `(post, embedding)` pair when the offer should join the
+        batch, or None if it is a duplicate or editing fails. Nothing is
+        published or persisted here.
         """
         decision = await self._duplicate_detector.run(candidate)
         if decision.is_duplicate:
             report.discarded_duplicates += 1
-            return False
+            return None
+
+        # The repository only knows past runs; catch the same offer cross-posted
+        # on several boards WITHIN this run, before any of them is persisted.
+        if any(
+            cosine_similarity(decision.embedding, emb) >= self._similarity_threshold
+            for _, emb in selected
+        ):
+            report.discarded_duplicates += 1
+            logger.info("workflow.intra_run_duplicate", title=candidate.title)
+            return None
 
         try:
             edited = await self._editor.run(candidate)
-            post = PublishableJobOffer(offer=candidate, edited=edited)
-            published = await self._publisher.run(post)
-            offer_id = await self._repo.save_published(published, decision.embedding)
         except Exception as exc:
             logger.exception("workflow.offer_failed", title=candidate.title)
             report.errors.append(f"{candidate.title}: {exc}")
-            return False
+            return None
 
-        await self._repo.increment_counter("published", 1)
-        metrics.increment("offers_published")
-        report.published += 1
-        report.published_offers.append(published)
-        logger.info(
-            "workflow.published",
-            offer_id=offer_id,
-            title=edited.title,
-            spain=is_spain_offer(candidate),
-        )
-        return True
+        post = PublishableJobOffer(offer=candidate, edited=edited)
+        return post, decision.embedding
+
+    async def _publish_and_persist(
+        self,
+        selected: list[tuple[PublishableJobOffer, list[float]]],
+        report: WorkflowReport,
+    ) -> None:
+        """Publish the selected offers as one summary + thread, then save history.
+
+        Persistence happens only for offers that actually reached Discord, so a
+        publishing outage leaves them unsaved and they are retried on a later
+        run instead of being silently buried as "already published".
+        """
+        if not selected:
+            return
+
+        posts = [post for post, _ in selected]
+        summary_date = datetime.now(UTC).strftime("%d/%m/%Y")
+        try:
+            published = await self._publisher.run_batch(posts, summary_date=summary_date)
+        except Exception as exc:
+            logger.exception("workflow.batch_publish_failed")
+            report.errors.append(str(exc))
+            return
+
+        for (_, embedding), result in zip(selected, published, strict=True):
+            if result is None:
+                continue
+            try:
+                offer_id = await self._repo.save_published(result, embedding)
+            except Exception as exc:
+                logger.exception("workflow.persist_failed", title=result.edited.title)
+                report.errors.append(f"{result.edited.title}: {exc}")
+                continue
+            await self._repo.increment_counter("published", 1)
+            metrics.increment("offers_published")
+            report.published += 1
+            report.published_offers.append(result)
+            logger.info(
+                "workflow.published",
+                offer_id=offer_id,
+                title=result.edited.title,
+                spain=is_spain_offer(result.offer),
+            )

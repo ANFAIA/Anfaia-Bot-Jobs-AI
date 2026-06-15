@@ -30,13 +30,16 @@ def build_workflow(
     min_relevance=55,
     europe_boost=15,
     spain_offers=1,
+    similarity_threshold=0.95,
 ):
     embeddings = HashEmbeddingProvider(64)
     llm = FakeLLM(llm_responses)
     return DailyJobsWorkflow(
         collector=JobCollectorAgent([StaticSource("test", offers)], max_items_per_source=50),
         classifier=JobClassifierAgent(llm),
-        duplicate_detector=DuplicateDetectorAgent(repo, embeddings, similarity_threshold=0.95),
+        duplicate_detector=DuplicateDetectorAgent(
+            repo, embeddings, similarity_threshold=similarity_threshold
+        ),
         editor=JobEditorAgent(llm),
         publisher=DiscordPublisherAgent(publisher),
         repository=repo,
@@ -44,6 +47,7 @@ def build_workflow(
         max_offers_per_run=max_offers,
         europe_boost=europe_boost,
         spain_offers_per_run=spain_offers,
+        duplicate_similarity_threshold=similarity_threshold,
     )
 
 

@@ -102,6 +102,7 @@ class Container:
             max_offers_per_run=settings.max_offers_per_run,
             europe_boost=settings.europe_boost,
             spain_offers_per_run=settings.spain_offers_per_run,
+            duplicate_similarity_threshold=settings.duplicate_similarity_threshold,
         )
 
         # --- Use cases ---

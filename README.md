@@ -27,8 +27,9 @@ publicación) y puede evolucionar a frameworks de orquestación como
      cross-posteada en varios portales).
   4. **Job Editor** — convierte el anuncio en una ficha clara en español: qué
      harías, qué piden, condiciones y por qué puede interesarte.
-  5. **Discord Publisher** — publica cada oferta como *embed* con reintentos y
-     gestión de errores.
+  5. **Discord Publisher** — publica un mensaje resumen con las ofertas del día
+     y, en un **hilo** de ese mensaje, cada oferta como *embed*; con reintentos
+     y gestión de errores.
 - **Varias ofertas por ejecución**: publica las `MAX_OFFERS_PER_RUN` mejores
   ofertas únicas de cada día (no solo una).
 - **Prioridad Europa + cupo España**: las ofertas aplicables desde Europa
@@ -196,7 +197,9 @@ curl http://localhost:8001/stats
 
 1. Crea una aplicación y un bot en el [Discord Developer Portal](https://discord.com/developers/applications).
 2. Copia el **token** del bot → `DISCORD_TOKEN`.
-3. Invita el bot a tu servidor con permiso de **enviar mensajes** en el canal.
+3. Invita el bot a tu servidor con permisos de **enviar mensajes**, **crear
+   hilos públicos** y **enviar mensajes en hilos** en el canal (necesarios para
+   publicar el resumen y abrir el hilo con las ofertas).
 4. Activa el *Developer Mode* en Discord, clic derecho sobre el canal → *Copiar ID* → `DISCORD_CHANNEL_ID`.
 
 ---

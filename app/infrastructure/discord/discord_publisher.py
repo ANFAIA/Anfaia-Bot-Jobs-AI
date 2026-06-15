@@ -20,7 +20,7 @@ from tenacity import (
 
 from app.core.logging import get_logger
 from app.domain.entities import PublishableJobOffer
-from app.infrastructure.discord.embed_builder import build_job_embed
+from app.infrastructure.discord.embed_builder import build_job_embed, build_summary_embed
 from app.interfaces.publisher import Publisher, PublisherError
 
 logger = get_logger(__name__)
@@ -29,6 +29,11 @@ logger = get_logger(__name__)
 # (no outbound WebSocket, blocked network) we fail fast with a clear message
 # instead of hanging on discord.py's internal reconnection loop.
 _CONNECT_TIMEOUT_SECONDS = 30.0
+# Extra budget per offer for the batch cycle, on top of the connect ceiling, so
+# sending several messages (possibly rate-limited) does not trip the timeout.
+_PER_OFFER_TIMEOUT_SECONDS = 10.0
+# Discord thread auto-archive after inactivity (minutes); 1440 = 24h.
+_THREAD_AUTO_ARCHIVE_MINUTES = 1440
 
 
 class DiscordPublisher(Publisher):
@@ -110,6 +115,117 @@ class DiscordPublisher(Publisher):
         message_id = await self._send(embed=embed)
         logger.info("discord.published", message_id=message_id, title=post.edited.title)
         return message_id
+
+    async def _send_batch(
+        self,
+        posts: list[PublishableJobOffer],
+        summary_embed: discord.Embed,
+        thread_name: str,
+    ) -> list[int | None]:
+        """Open one session: post the summary, open a thread, fill it with offers.
+
+        Per-offer send failures are swallowed (recorded as ``None``) so a single
+        bad offer does not abort the rest of the batch. Only a failure to
+        connect or to create the summary/thread aborts the whole publication.
+        """
+        target_channel = self._channel_id
+        intents = discord.Intents.none()
+        client = discord.Client(intents=intents)
+        result: dict[str, object] = {}
+
+        @client.event
+        async def on_ready() -> None:
+            try:
+                channel = client.get_channel(target_channel) or await client.fetch_channel(
+                    target_channel
+                )
+                if not isinstance(channel, discord.abc.Messageable):
+                    raise PublisherError(f"El canal {target_channel} no admite mensajes")
+                summary = await channel.send(embed=summary_embed)
+                if not hasattr(summary, "create_thread"):
+                    raise PublisherError(
+                        f"El canal {target_channel} no admite hilos; usa un canal de "
+                        "texto del servidor para publicar las ofertas en un hilo"
+                    )
+                thread = await summary.create_thread(
+                    name=thread_name,
+                    auto_archive_duration=_THREAD_AUTO_ARCHIVE_MINUTES,
+                )
+                message_ids: list[int | None] = []
+                for post in posts:
+                    try:
+                        message = await thread.send(embed=build_job_embed(post))
+                        message_ids.append(message.id)
+                    except discord.HTTPException as exc:
+                        logger.warning(
+                            "discord.thread_send_failed",
+                            title=post.edited.title,
+                            error=str(exc),
+                        )
+                        message_ids.append(None)
+                result["summary_id"] = summary.id
+                result["message_ids"] = message_ids
+            except discord.Forbidden as exc:
+                result["error"] = PublisherError(
+                    f"El bot no tiene permisos suficientes en el canal {target_channel} "
+                    f"(necesita Ver canal + Enviar mensajes + Insertar enlaces + "
+                    f"Crear hilos públicos + Enviar mensajes en hilos): {exc}"
+                )
+            except discord.NotFound as exc:
+                result["error"] = PublisherError(
+                    f"Canal {target_channel} no encontrado; revisa la configuración "
+                    f"y que el bot esté en ese servidor: {exc}"
+                )
+            except PublisherError as exc:
+                result["error"] = exc
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                await client.close()
+
+        timeout = _CONNECT_TIMEOUT_SECONDS + _PER_OFFER_TIMEOUT_SECONDS * len(posts)
+        try:
+            async with asyncio.timeout(timeout):
+                await client.start(self._token)
+        except discord.LoginFailure as exc:
+            raise PublisherError(
+                f"Token de Discord inválido (revisa DISCORD_TOKEN): {exc}"
+            ) from exc
+        except TimeoutError as exc:
+            await client.close()
+            raise PublisherError(
+                "Timeout conectando al gateway de Discord; revisa la conectividad "
+                "de red saliente (wss://gateway.discord.gg) desde el contenedor"
+            ) from exc
+        except (discord.HTTPException, OSError) as exc:
+            raise PublisherError(f"No se pudo conectar con Discord: {exc}") from exc
+
+        if "error" in result:
+            raise PublisherError(str(result["error"]))
+        if "message_ids" not in result:
+            raise PublisherError("Discord cerró la sesión sin confirmar el envío")
+        return result["message_ids"]  # type: ignore[return-value]
+
+    @retry(
+        retry=retry_if_exception_type((discord.HTTPException, ConnectionError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=20),
+        reraise=True,
+    )
+    async def publish_batch(
+        self, posts: list[PublishableJobOffer], *, summary_date: str
+    ) -> list[int | None]:
+        if not posts:
+            return []
+        summary_embed = build_summary_embed(posts, date_label=summary_date)
+        thread_name = f"Ofertas · {summary_date}"[:100]
+        message_ids = await self._send_batch(posts, summary_embed, thread_name)
+        logger.info(
+            "discord.batch_published",
+            published=sum(1 for mid in message_ids if mid is not None),
+            total=len(posts),
+        )
+        return message_ids
 
     async def publish_test_message(self, text: str) -> int:
         message_id = await self._send(content=f"✅ Anfaia Jobs AI · test\n{text}")
