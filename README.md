@@ -28,8 +28,8 @@ publicación) y puede evolucionar a frameworks de orquestación como
   4. **Job Editor** — convierte el anuncio en una ficha clara en español: qué
      harías, qué piden, condiciones y por qué puede interesarte.
   5. **Discord Publisher** — publica un mensaje resumen con las ofertas del día
-     y, en un **hilo** de ese mensaje, cada oferta como *embed*; con reintentos
-     y gestión de errores.
+     y abre **un hilo por oferta** (cada uno con su *embed*); con reintentos y
+     gestión de errores.
 - **Varias ofertas por ejecución**: publica las `MAX_OFFERS_PER_RUN` mejores
   ofertas únicas de cada día (no solo una).
 - **Prioridad Europa + cupo España**: las ofertas aplicables desde Europa

@@ -4,15 +4,15 @@ Pipeline:
 
     Collect Offers → Classify → Rank (Europe-friendly first) → Remove Duplicates
     → Edit Job Post → (collect the top N unique offers)
-    → Publish daily batch to Discord (summary message + a thread of offers)
+    → Publish daily batch to Discord (summary message + one thread per offer)
     → Save History
 
 It is a custom implementation (without an orchestration framework) that honors
 the `JobsWorkflow` contract. Each step delegates to a specialized agent. Unlike
 a news digest, a jobs channel benefits from several posts per run, so the
 pipeline walks the ranked candidates, selects the top N unique offers and then
-publishes them together: one summary message announcing the day's offers, with
-every offer posted inside a thread hanging off that message.
+publishes them together: one summary message announcing the day's offers, plus
+one thread per offer (each carrying the offer's full detail).
 
 Three community-driven selection rules apply on top of the relevance ranking:
   - Offers applicable from Europe get a ranking boost (and offers explicitly
@@ -127,7 +127,7 @@ class DailyJobsWorkflow(JobsWorkflow):
         # 4-6. Walk the ranked candidates and SELECT the day's batch: dedup and
         # edit each one, collecting up to `max_offers` unique offers. Nothing is
         # published or persisted yet — that happens once, in a single batch, so
-        # the whole run shows up as one summary message plus a thread of offers.
+        # the whole run shows up as one summary message plus one thread per offer.
         # Spain-based offers get their reserved slots first; unused slots (no
         # unique Spain offer today) go back to the general pool. At most one
         # offer per company makes it into the same run.
@@ -232,7 +232,7 @@ class DailyJobsWorkflow(JobsWorkflow):
         selected: list[tuple[PublishableJobOffer, list[float]]],
         report: WorkflowReport,
     ) -> None:
-        """Publish the selected offers as one summary + thread, then save history.
+        """Publish the offers as one summary + a thread each, then save history.
 
         Persistence happens only for offers that actually reached Discord, so a
         publishing outage leaves them unsaved and they are retried on a later

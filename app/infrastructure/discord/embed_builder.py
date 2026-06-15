@@ -30,13 +30,15 @@ def _field(value: str) -> str:
 
 
 def build_summary_embed(posts: list[PublishableJobOffer], *, date_label: str) -> discord.Embed:
-    """Daily header announcing the batch; the offers themselves go in its thread."""
+    """Daily header announcing the batch; each offer lives in its own thread."""
     count = len(posts)
     noun = "oferta" if count == 1 else "ofertas"
     lines = []
     for post in posts:
         company = post.offer.company.strip()
-        suffix = f" · {company}" if company else ""
+        salary = post.offer.salary.strip()
+        parts = [company, f"💰 {salary}" if salary else ""]
+        suffix = "".join(f" · {part}" for part in parts if part)
         lines.append(f"• **{post.edited.title}**{suffix}")
     description = "\n".join(lines)
     if len(description) > _MAX_DESCRIPTION:
@@ -48,7 +50,7 @@ def build_summary_embed(posts: list[PublishableJobOffer], *, date_label: str) ->
         color=_SUMMARY_COLOR,
     )
     embed.set_author(name="Anfaia Jobs AI")
-    embed.set_footer(text=f"{count} {noun} · abre el hilo para ver el detalle 👇")
+    embed.set_footer(text=f"{count} {noun} · cada una tiene su propio hilo 👇")
     return embed
 
 

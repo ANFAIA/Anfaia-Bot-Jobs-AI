@@ -30,10 +30,19 @@ logger = get_logger(__name__)
 # instead of hanging on discord.py's internal reconnection loop.
 _CONNECT_TIMEOUT_SECONDS = 30.0
 # Extra budget per offer for the batch cycle, on top of the connect ceiling, so
-# sending several messages (possibly rate-limited) does not trip the timeout.
-_PER_OFFER_TIMEOUT_SECONDS = 10.0
+# creating a thread + sending its message per offer (possibly rate-limited) does
+# not trip the timeout.
+_PER_OFFER_TIMEOUT_SECONDS = 15.0
 # Discord thread auto-archive after inactivity (minutes); 1440 = 24h.
 _THREAD_AUTO_ARCHIVE_MINUTES = 1440
+# Discord caps thread names at 100 characters.
+_MAX_THREAD_NAME = 100
+
+
+def _thread_name(post: PublishableJobOffer) -> str:
+    """Thread title for an offer: its edited headline, trimmed to Discord's cap."""
+    title = post.edited.title.strip() or "Oferta de empleo"
+    return title[: _MAX_THREAD_NAME - 1] + "…" if len(title) > _MAX_THREAD_NAME else title
 
 
 class DiscordPublisher(Publisher):
@@ -120,13 +129,14 @@ class DiscordPublisher(Publisher):
         self,
         posts: list[PublishableJobOffer],
         summary_embed: discord.Embed,
-        thread_name: str,
     ) -> list[int | None]:
-        """Open one session: post the summary, open a thread, fill it with offers.
+        """Open one session: post the summary, then one thread per offer.
 
-        Per-offer send failures are swallowed (recorded as ``None``) so a single
-        bad offer does not abort the rest of the batch. Only a failure to
-        connect or to create the summary/thread aborts the whole publication.
+        Posts the daily header in the channel and, for each offer, opens its own
+        public thread (named after the offer) and sends the offer embed inside.
+        Per-offer failures are swallowed (recorded as ``None``) so a single bad
+        offer does not abort the rest of the batch. Only a failure to connect or
+        to post the summary aborts the whole publication.
         """
         target_channel = self._channel_id
         intents = discord.Intents.none()
@@ -141,24 +151,25 @@ class DiscordPublisher(Publisher):
                 )
                 if not isinstance(channel, discord.abc.Messageable):
                     raise PublisherError(f"El canal {target_channel} no admite mensajes")
-                summary = await channel.send(embed=summary_embed)
-                if not hasattr(summary, "create_thread"):
+                if not hasattr(channel, "create_thread"):
                     raise PublisherError(
                         f"El canal {target_channel} no admite hilos; usa un canal de "
-                        "texto del servidor para publicar las ofertas en un hilo"
+                        "texto del servidor para publicar cada oferta en su hilo"
                     )
-                thread = await summary.create_thread(
-                    name=thread_name,
-                    auto_archive_duration=_THREAD_AUTO_ARCHIVE_MINUTES,
-                )
+                summary = await channel.send(embed=summary_embed)
                 message_ids: list[int | None] = []
                 for post in posts:
                     try:
+                        thread = await channel.create_thread(
+                            name=_thread_name(post),
+                            type=discord.ChannelType.public_thread,
+                            auto_archive_duration=_THREAD_AUTO_ARCHIVE_MINUTES,
+                        )
                         message = await thread.send(embed=build_job_embed(post))
                         message_ids.append(message.id)
                     except discord.HTTPException as exc:
                         logger.warning(
-                            "discord.thread_send_failed",
+                            "discord.thread_create_failed",
                             title=post.edited.title,
                             error=str(exc),
                         )
@@ -218,8 +229,7 @@ class DiscordPublisher(Publisher):
         if not posts:
             return []
         summary_embed = build_summary_embed(posts, date_label=summary_date)
-        thread_name = f"Ofertas · {summary_date}"[:100]
-        message_ids = await self._send_batch(posts, summary_embed, thread_name)
+        message_ids = await self._send_batch(posts, summary_embed)
         logger.info(
             "discord.batch_published",
             published=sum(1 for mid in message_ids if mid is not None),
